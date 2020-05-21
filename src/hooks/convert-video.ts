@@ -46,8 +46,12 @@ const s3BlobStore = new S3BlobStore({
   acl: 'public-read'
 })
 
+const stereoConversion = '-vf "stereo3d=sbsl:ml,transpose=1,setdar=16/9" '
+
 export default async (context: any): Promise<void> => {
   const { result, app } = context
+
+  context.params.provider = null // Will get around upload's isProvider check
 
   if (Array.isArray(result)) {
     return
@@ -63,10 +67,10 @@ export default async (context: any): Promise<void> => {
       fileId = match[1]
       if (/youtube.com/.test(url) || /youtu.be/.test(url)) {
         context.params.videoSource = 'youtube'
-        context.data.metadata['360_format'] = 'eac'
+        context.data.metadata['360_format'] = context.data.metadata['360_format'] != null ? context.data.metadata['360_format'] : 'eac'
       } else if (/vimeo.com/.test(url)) {
         context.params.videoSource = 'vimeo'
-        context.data.metadata['360_format'] = 'equirectangular'
+        context.data.metadata['360_format'] = context.data.metadata['360_format'] != null ? context.data.metadata['360_format'] : 'equirectangular'
       }
     }
   }
@@ -78,9 +82,9 @@ export default async (context: any): Promise<void> => {
     localContext.params.storageProvider = new StorageProvider()
     localContext.params.uploadPath = path.join('public', localContext.params.videoSource, fileId, 'video')
 
-    if (context.data.metadata.thumbnail_url != null) {
+    if (context.data.metadata.thumbnail_url != null && context.data.metadata.thumbnail_url.length > 0) {
       thumbnailUploadResult = await uploadThumbnailLinkHook()(localContext)
-      localContext.params.thumbnailUrl = thumbnailUploadResult.params.thumbnailUrl
+      localContext.params.thumbnailUrl = localContext.data.metadata.thumbnail_url = thumbnailUploadResult.params.thumbnailUrl
     }
 
     const s3Key = path.join('public', localContext.params.videoSource, fileId, 'video', dashManifestName)
@@ -117,7 +121,7 @@ export default async (context: any): Promise<void> => {
               })
           })
 
-          if (localContext.data.metadata.thumbnail_url == null) {
+          if (localContext.data.metadata.thumbnail_url == null || localContext.data.metadata.thumbnail_url.length === 0) {
             console.log('Getting thumbnail from youtube-dl')
 
             const thumbnailUrlResult = await new Promise((resolve, reject) => {
@@ -137,7 +141,9 @@ export default async (context: any): Promise<void> => {
 
             localContext.data.metadata.thumbnail_url = localContext.result.metadata.thumbnail_url = (thumbnailUrlResult as any)[0]
 
-            thumbnailUploadResult = await uploadThumbnailLinkHook()(localContext)
+            const localContextClone = _.cloneDeep(localContext)
+            localContextClone.params.parentResourceId = result.id
+            thumbnailUploadResult = await uploadThumbnailLinkHook()(localContextClone)
 
             localContext.data.metadata.thumbnail_url = thumbnailUploadResult.params.thumbnailUrl
           }
@@ -146,7 +152,11 @@ export default async (context: any): Promise<void> => {
 
           try {
             // -hls_playlist 1 generates HLS playlist files as well. The master playlist is generated with the filename master.m3u8
-            await promiseExec('ffmpeg -i ' + rawVideoPath + ' -f dash -hls_playlist 1 -c:v libx264 -map 0:v:0 -map 0:a:0 -b:v:0 7000k -profile:v:0 main -use_timeline 1 -use_template 1 ' + dashManifestPath)
+            let ffmpegCommand = 'ffmpeg -i ' + rawVideoPath + ' -f dash -hls_playlist 1 '
+            const ffmpegCommandEnd = '-c:v libx264 -map 0:v:0 -map 0:a:0 -b:v:0 7000k -profile:v:0 main -use_timeline 1 -use_template 1 ' + dashManifestPath
+            if (localContext.data.metadata.stereoscopic === true) { ffmpegCommand += stereoConversion }
+            ffmpegCommand += ffmpegCommandEnd
+            await promiseExec(ffmpegCommand)
           } catch (err) {
             console.log('ffmpeg error')
             console.log(err)
@@ -176,7 +186,8 @@ export default async (context: any): Promise<void> => {
           throw err
         }
       } else {
-        console.log('File already existed, just making DB entries and updating URL')
+        const localFilePath = path.join(appRootPath.path, 'temp_videos', fileId)
+        console.log('File already existed for ' + fileId + ', just making DB entries and updating URL')
         const s3Path = path.join('public', localContext.params.videoSource, fileId, 'video')
         const bucketObjects = await new Promise((resolve, reject) => {
           s3.listObjects({
@@ -194,14 +205,14 @@ export default async (context: any): Promise<void> => {
           })
         })
 
-        if (localContext.data.metadata.thumbnail_url == null) {
+        if (localContext.data.metadata.thumbnail_url == null || localContext.data.metadata.thumbnail_url.length === 0) {
           console.log('Getting thumbnail from youtube-dl')
-          const localFilePath = path.join(appRootPath.path, 'temp_videos', fileId)
           localContext.params.storageProvider = new StorageProvider()
           localContext.params.uploadPath = s3Path
+          await fs.promises.rmdir(localFilePath, { recursive: true })
+          await fs.promises.mkdir(localFilePath, { recursive: true })
 
           const thumbnailUrlResult = await new Promise((resolve, reject) => {
-            console.log('exec youtube-dl')
             youtubedl.exec(url,
               ['--get-thumbnail'],
               { cwd: localFilePath },
@@ -214,9 +225,13 @@ export default async (context: any): Promise<void> => {
               })
           })
 
+          console.log('Got thumbnail from yt-dl: ' + thumbnailUrlResult)
+
           localContext.data.metadata.thumbnail_url = localContext.result.metadata.thumbnail_url = (thumbnailUrlResult as any)[0]
 
-          thumbnailUploadResult = await uploadThumbnailLinkHook()(localContext)
+          const localContextClone = _.cloneDeep(localContext)
+          localContextClone.params.parentResourceId = result.id
+          thumbnailUploadResult = await uploadThumbnailLinkHook()(localContextClone)
 
           localContext.data.metadata.thumbnail_url = thumbnailUploadResult.params.thumbnailUrl
         } else {
@@ -255,6 +270,8 @@ export default async (context: any): Promise<void> => {
 
         await Promise.all(creationPromises)
 
+        await fs.promises.rmdir(localFilePath, { recursive: true })
+
         console.log('All static-resources created')
 
         return localContext
@@ -267,7 +284,7 @@ export default async (context: any): Promise<void> => {
   }
 }
 
-const uploadFile = async (localFilePath: string, fileId: string, localContext: any, app: Application, resultId: number): Promise<void> => {
+const uploadFile = async (localFilePath: string, fileId: string, context: any, app: Application, resultId: number): Promise<void> => {
   // eslint-disable-next-line @typescript-eslint/no-misused-promises, no-async-promise-executor
   return await new Promise(async (resolve, reject) => {
     const promises = []
@@ -284,6 +301,7 @@ const uploadFile = async (localFilePath: string, fileId: string, localContext: a
             // @ts-ignore
             const mimetype = mimetypeDict[extension]
 
+            const localContext = _.cloneDeep(context)
             localContext.params.file = {
               fieldname: 'file',
               originalname: file,
@@ -320,7 +338,7 @@ const uploadFile = async (localFilePath: string, fileId: string, localContext: a
             resolve()
           }))
         } else {
-          promises.push(uploadFile(path.join(localFilePath, file), fileId, localContext, app, resultId))
+          promises.push(uploadFile(path.join(localFilePath, file), fileId, context, app, resultId))
         }
       }
 

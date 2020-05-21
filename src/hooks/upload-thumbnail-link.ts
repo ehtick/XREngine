@@ -1,7 +1,7 @@
 import bent from 'bent'
 import { Hook, HookContext } from '@feathersjs/feathers'
 
-const fileRegex = /.([a-zA-Z0-9]+)$/
+const fileRegex = /\.([a-zA-Z0-9]+)(?=\?|$)/
 const getBuffer = bent('buffer')
 
 export default (options = {}): Hook => {
@@ -23,6 +23,7 @@ export default (options = {}): Hook => {
       context.params.mime_type = context.params.file.mimetype = 'image/' + extension
       context.data.name = context.params.file.originalname
       context.data.metadata = context.data.metadata ? context.data.metadata : {}
+      context.data.parentResourceId = context.params.parentResourceId
       context.params.uploadPath = context.params.uploadPath.replace('video', 'image')
       const uploadResult = await app.services.upload.create(context.data, context.params)
       const parent = await app.services['static-resource'].get(result.id)

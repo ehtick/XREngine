@@ -1,14 +1,15 @@
 export const seed = {
   disabled: (process.env.FORCE_DB_REFRESH !== 'true'),
-  delete: true,
+  delete: (process.env.FORCE_DB_REFRESH === 'true'),
   path: 'user-relationship-type',
   randomize: false,
   templates:
-      [
-        { type: 'requested' }, // Default state of relatedUser
-        { type: 'friend' },
-        { type: 'blocked' }
-      ]
+    [
+      { type: 'requested' }, // Default state of relatedUser
+      { type: 'friend' },
+      { type: 'blocking' }, // Blocking another user
+      { type: 'blocked' } // Blocked by other user
+    ]
 }
 
 export default seed
